@@ -1,0 +1,250 @@
+---
+title: "EEA - TP Investigacion - VIs - Simulacion"
+author: "Martín Vazquez Cirulli"
+date: "2024-11-26"
+output:
+  html_document:
+    toc: true
+    toc_float: true 
+    theme: flatly
+    df_print: paged
+pdf_document:
+    toc: true
+---
+
+```{r setup, message = FALSE,warning=FALSE}
+library(dplyr)
+library(readr)
+library(tidyverse)
+library(lmtest)
+library(AER)
+options(repos = c(CRAN = "<http://cran.rstudio.com>"))
+```
+
+
+```{r generac_datos_sinteticos,message = FALSE,warning=FALSE}
+generar_datos <- function(n, beta0, beta1, rho, gamma, kappa) {
+  # Tamaño de la muestra
+  n <- n
+
+  # Coeficientes del modelo
+  beta0 <- beta0
+  beta1 <- beta1
+
+  # Correlación entre u y v
+  rho <- rho
+
+  # Fuerza de la asociación entre x y z
+  gamma <- gamma
+
+  # Generar variables
+  z <- rnorm(n)
+  v <- rnorm(n)
+
+  x <- gamma*z + v
+  
+  y <- beta0 + beta1*x + u
+  
+  u <- rho*v + sqrt(1-rho^2)*rnorm(n) +  abs(x) * kappa
+
+  # Crear dataframe
+  datos <- data.frame(y, x, z)
+  return(datos)
+}
+
+```
+
+```{r estimac_modelos,message = FALSE,warning=FALSE}
+
+# Función para generar datos y estimar modelos, incluyendo cálculo de residuos
+simular_y_estimar <- function(n, beta0, beta1, rho, gamma, kappa) {
+  # Generar datos
+  datos <- generar_datos(n, beta0, beta1, rho, gamma, kappa)
+
+  # Estimar por MCO
+  modelo_mco <- lm(y ~ x, data = datos)
+  residuos_mco <- residuals(modelo_mco)
+
+  # Estimar por 2SLS
+  modelo_2sls <- ivreg(y ~ x | z, data = datos)
+  residuos_2sls <- residuals(modelo_2sls)
+
+  # Extraer coeficientes
+  coef_mco <- coef(modelo_mco)[2]
+  coef_2sls <- coef(modelo_2sls)[2]
+
+  # Calcular estadísticas de los residuos (opcional)
+  # Por ejemplo, media de los residuos
+  media_residuos_mco <- mean(residuos_mco)
+  media_residuos_2sls <- mean(residuos_2sls)
+
+  # Retornar resultados
+  return(list(coef_mco = coef_mco, coef_2sls = coef_2sls, 
+              residuos_mco = residuos_mco, residuos_2sls = residuos_2sls,
+              media_residuos_mco = media_residuos_mco, media_residuos_2sls = media_residuos_2sls))
+}
+
+# Función para realizar la simulación de Monte Carlo
+simular_monte_carlo <- function(n_sims, n, beta0, beta1, rho_vec, gamma_vec,kappa) {
+  # Crear una lista vacía para almacenar los resultados
+  resultados_lista <- list()
+
+  for (i in 1:length(rho_vec)) {
+    for (j in 1:length(gamma_vec)) {
+      for (sim in 1:n_sims) {
+        resultados <- simular_y_estimar(n, beta0, beta1, rho_vec[i], gamma_vec[j],kappa)
+        # Agregar los resultados como una lista a la lista principal
+        resultados_lista[[length(resultados_lista) + 1]] <- 
+          c(rho_vec[i], gamma_vec[j], resultados$coef_mco, resultados$coef_2sls,
+            resultados$media_residuos_mco, resultados$media_residuos_2sls)
+      }
+    }
+  }
+
+  # Convertir la lista en un data frame
+  resultados_df <- data.frame(do.call(rbind, resultados_lista))
+  colnames(resultados_df) <- c("rho", "gamma", "OLS", "SLS", "Residuos_MCO", "Residuos_SLS")
+
+  return(resultados_df)
+}
+
+```
+
+```{r simulaciones, message = FALSE,warning=FALSE}
+
+# Función para generar datos y estimar modelos
+simular_y_estimar <- function(n, beta0, beta1, rho, gamma, kappa) {
+  # Generar datos
+  datos <- generar_datos(n, beta0, beta1, rho, gamma, kappa)
+
+  # Estimar por MCO
+  modelo_mco <- lm(y ~ x, data = datos)
+
+  # Estimar por 2SLS
+  modelo_2sls <- ivreg(y ~ x | z, data = datos)
+
+  # Extraer coeficientes
+  coef_mco <- coef(modelo_mco)[2]
+  coef_2sls <- coef(modelo_2sls)[2]
+
+  return(c(coef_mco, coef_2sls))
+}
+
+# Función para realizar la simulación de Monte Carlo
+simular_monte_carlo <- function(n_sims, n, beta0, beta1, rho_vec, gamma_vec,kappa) {
+# Crear una lista vacía para almacenar los resultados
+  resultados_lista <- list()
+
+  for (i in 1:length(rho_vec)) {
+    for (j in 1:length(gamma_vec)) {
+      for (sim in 1:n_sims) {
+        resultados <- simular_y_estimar(n, beta0, beta1, rho_vec[i], gamma_vec[j],kappa)
+        # Agregar los resultados como una lista a la lista principal
+        resultados_lista[[length(resultados_lista) + 1]] <- c(rho_vec[i], gamma_vec[j],resultados)
+      }
+    }
+  }
+
+  # Convertir la lista en un data frame
+  resultados_df <- data.frame(do.call(rbind, resultados_lista))
+  colnames(resultados_df) <- c("rho", "gamma","OLS", "SLS")
+
+  return(resultados_df)
+}
+
+```
+
+```{r analisis_dinamico_de_resultados, message = FALSE,warning=FALSE}
+library(shiny)
+library(ggplot2)
+library(DT)
+
+# UI de la aplicación
+ui <- fluidPage(
+  titlePanel("Simulación para estimación de coeficientes de regresión en presencia de endogeneidad (OLS) y con VIs (2SLS)"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("rho", "Correlación entre errores u y v (Nivel de Endogeneidad)", min = -1, max = 1, value = 0, step=0.1),
+      sliderInput("gamma", "Fuerza de la asociación entre variable endógena y su VI", min = 0, max = 5, value = 0, step=0.1),
+      sliderInput("kappa", "Factor de heterocedasticidad", min = 0, max = 0.01, value = 0, step=0.0001),
+      numericInput("n_sims", "Nro de simulaciones", value = 1000)
+    ),
+    mainPanel(
+      DTOutput("tabla_estadisticas"),
+      plotOutput("plot_hist_2sls"),
+      plotOutput("plot_hist_ols"),
+      plotOutput("plot_residuos_promedio"),
+      plotOutput("plot_scatter")
+    )
+  )
+)
+
+# Server de la aplicación
+server <- function(input, output) {
+  resultados <- reactive({
+    simular_monte_carlo(input$n_sims, 100, 0, 1, 
+                        c(input$rho), c(input$gamma), c(input$kappa))
+  })
+  
+  tabla_estadisticas <- reactive({
+    data.frame(
+      Estimador = c("OLS", "2SLS"),
+      Media = c(mean(resultados()$OLS), mean(resultados()$SLS)),
+      Mediana = c(median(resultados()$OLS), median(resultados()$SLS)),
+      Desviacion_Estandar = c(sd(resultados()$OLS), sd(resultados()$SLS))
+    )
+  })
+  
+  output$tabla_estadisticas <- renderDT({
+    datatable(tabla_estadisticas(), options = list(pageLength = 5))
+  })
+  
+  output$plot_scatter <- renderPlot({
+    ggplot(resultados(), aes(x = OLS, y = SLS)) +
+      geom_point() +
+      geom_abline(intercept = 0, slope = 1) +
+      labs(x = "Estimador MCO", y = "Estimador 2SLS",
+           title = paste("Comparación de estimadores para rho =", input$rho,
+                        "y gamma =", input$gamma))
+  })
+  output$plot_hist_2sls <- renderPlot({
+    ggplot(resultados(), aes(x = SLS)) +
+      geom_histogram(bins = 50, boundary = 0, fill = "lightgreen", color = "black") +
+      labs(x = "Estimador 2SLS", title = "Histograma de Estimador 2SLS")
+  })
+
+  output$plot_hist_ols <- renderPlot({
+    ggplot(resultados(), aes(x = OLS)) +
+      geom_histogram(bins = 50, boundary = 0, fill = "red", color = "black") +
+      labs(x = "Estimador OLS", title = "Histograma de Estimador OLS")
+  })
+  
+  output$plot_scatter <- renderPlot({
+    ggplot(resultados(), aes(x = OLS, y = SLS)) +
+      geom_point() +
+      geom_abline(intercept = 0, slope = 1) +
+      labs(x = "Estimador MCO", y = "Estimador 2SLS",
+           title = paste("Comparación de estimadores para rho =", input$rho,
+                        "y gamma =", input$gamma))
+  })
+  
+  # Gráfico de líneas de los residuos promedio
+  output$plot_residuos_promedio <- renderPlot({
+  # Crear una columna para identificar la simulación
+  resultados() %>%
+    mutate(sim = row_number()) %>%
+    ggplot(aes(x = sim, y = Residuos_MCO, color = "OLS")) +
+    geom_line() +
+    geom_line(aes(y = Residuos_SLS, color = "2SLS")) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    labs(x = "Simulación", y = "Residuos Promedio",
+         title = "Evolución de los Residuos Promedio",
+         color = "Modelo")
+})
+  
+}
+
+# Ejecutar la aplicación
+shinyApp(ui = ui, server = server)
+
+```

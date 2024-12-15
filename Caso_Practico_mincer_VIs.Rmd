@@ -1,0 +1,194 @@
+---
+title: "Mincer con Variables Instrumentales"
+author: "Ian Link"
+date: "2024-12-12"
+output:
+  html_document:
+    toc: yes
+    code_folding: show
+    toc_float: yes
+    df_print: paged
+    theme: united
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<!-- Configuración General. -->
+```{r configuracion_gral,include=FALSE}
+#a. Indica desde dónde instalar paquetes
+options(repos = c(CRAN = "http://cran.rstudio.com")) 
+#b. Seteo de directorio de trabajo
+setwd("C:/Users/c678456/Desktop/Ian/Maestría/Especializacion/2do_cuatrimestre/EEA/Mincer/")
+```
+
+## 1. Justificación teórica.
+##### Wooldridge (2019) plantea la idea de predecir el salario en función de la educación y la habilidad/capacidad del individuo. Dado que dicha habilidad no es mensurable, se omite y, producto de dicha omisión, se incluye en el error del modelo. Como la educación y la habilidad correlacionan de manera positiva, la educación ahora hace lo propio con el error del modelo, convirtiéndose en una variable endógena. Siguiendo esta línea, si consideramos la ecuación de Mincer (1974), la literatura ha dado cuenta de diversas variables instrumentales para salvar este problema. Como la educación de los padres (Card,1999) ó  la cercanía de escuelas en zonas residenciales (Angrist y Krueger, 1991). En este sentido, y en un contexto argentino, se ha planteado la pregunta “¿Vale la pena estudiar?” (Adrogué et al., 2022), en tanto la relación entre el estudiar y un mejor salario. Nos proponemos tomar como base dicho cuestionamiento y actualizarlo, implementando VI.
+#####  Con tal fin se emplearán datos del 2do trimestre del 2024 de la Encuesta Permanente de Hogares (EPH) individual, realizada por el Instituto de Estadísticas y Censos (INDEC) de la República Argentina, donde las personas dan a conocer características sociodemográficas y socioeconómicas. 
+
+## 2. Librerias.
+```{r librerias, results="hide",message=FALSE, warning=FALSE}
+#i. Cargo Librerias.
+library(readxl)
+library(tidyverse) # Metalibrería para el manejo de datos.
+library(tidymodels) # Metalibrería para el análisis de modelos.
+library(dplyr)
+library(ivreg)
+```
+
+## 3. Lectura de datos crudos.
+```{r lectura_datos, results="hide",message=FALSE, warning=FALSE}
+#i. Leo los datos propiamente dichos.
+df <- read_excel("./usu_individual_T224.xlsx")
+```
+
+## 4. Filtro las columnas de interés.
+```{r filtrado_de_columnas}
+#i. Defino las columnas de interés.
+cols_interes <- c("CODUSU", "ANO4", "TRIMESTRE", "NRO_HOGAR", "COMPONENTE", "ESTADO", "CH03", "NIVEL_ED", "CH06", "P21", "PP3E_TOT", "CH04")
+#ii. Realizo el filtro propiamente dicho.
+df_filtrado <- df %>% select(all_of(cols_interes))
+#iii. Elimino columnas con valores únicos.
+df_filtrado <- df_filtrado %>% select(-ANO4, -TRIMESTRE)
+```
+
+## 5. Filtro los casos de interés, y joineo la educación del padre/madre.
+##### Se realiza un preprocesamiento orientado a reproducir la ecuación de Mincer (1974) desde la propuesta de Card (1999): Se filtran solamente aquellas personas ocupadas, que comparten hogar con su progenitor/jefe, y se extrae su nivel educativo.
+```{r extraccion_neduc_xadres}
+ #i. Filtro los Hijos ocupados, y elimino las columnas que ya no me sirven.
+df_hijos <- df_filtrado %>% 
+  filter(CH03 == 3 & ESTADO == 1) %>% 
+  select(-CH03, -ESTADO)
+
+#ii. Filtro los que se declaran como xadre ó Jefe del hogar, elimino las columnas innecesarias, y me quedo con solo uno por hogar.
+df_xadre <- df_filtrado %>% 
+  filter(CH03 == 6 | CH03 == 1) %>% 
+  select(-ESTADO, -COMPONENTE, -CH03, -CH06, -P21, -PP3E_TOT, -CH04) %>% 
+  arrange(CODUSU, NRO_HOGAR, desc(NIVEL_ED)) %>% 
+  distinct(CODUSU, NRO_HOGAR, .keep_all = TRUE) %>% 
+  rename(NIVEL_ED_progenitor = NIVEL_ED)
+
+#iii. Joineo el nivel educativo del progenitor con el del sujeto de estudio.
+df_consolidado <- df_hijos %>% 
+  left_join(df_xadre, by = c("CODUSU", "NRO_HOGAR")) %>% 
+  filter(!is.na(NIVEL_ED_progenitor) & P21 > 0 & PP3E_TOT > 0) %>% 
+  select(-CODUSU, -NRO_HOGAR, -COMPONENTE)
+```
+
+## 6. Creación de nuevas columnas.
+```{r creacion_columnas}
+#i. Renombro.
+df_consolidado <- df_consolidado %>% 
+  rename(Edad = CH06, Ingreso_Principal = P21, Horas_Principal = PP3E_TOT, Sexo = CH04)
+
+#ii. Años de educación.
+niveles_educativos <- c(
+  `1` = 6,   # Primario incompleto.
+  `2` = 10,  # Primario completo.
+  `3` = 13,  # Secundario incompleto.
+  `4` = 15,  # Secundario completo.
+  `5` = 18,  # Superior universitario incompleto.
+  `6` = 21,  # Superior universitario completo.
+  `7` = 0,   # Sin instrucción.
+  `9` = NA   # Ns/Nr (No sabe/No responde).
+)
+
+df_consolidado <- df_consolidado %>% 
+  mutate(anios_educacion = niveles_educativos[NIVEL_ED], 
+         anios_educacion_progenitor = niveles_educativos[NIVEL_ED_progenitor]) %>% 
+  select(-NIVEL_ED, -NIVEL_ED_progenitor)
+
+#iii. Experiencia potencial.
+df_consolidado <- df_consolidado %>% 
+  mutate(Experiencia_Potencial = Edad - anios_educacion)
+
+#iv. Salario_Horario.
+df_consolidado <- df_consolidado %>% 
+  mutate(Salario_Horario = Ingreso_Principal / Horas_Principal)
+
+#v. Convierto a Sexo como categórica (está como numérica).
+df_consolidado <- df_consolidado %>%
+  mutate(Sexo = factor(Sexo, levels = c(1, 2), labels = c("Varon", "Mujer")))
+```
+
+## 7. Eliminación de columnas que no se usarán para realizar la regresión.
+```{r eliminacion_cols}
+#i. Elimino columnas de interés.
+df_consolidado <- df_consolidado %>% 
+  select(-Edad, -Ingreso_Principal, -Horas_Principal)
+```
+
+## 8. Modelo de regresión lineal.
+```{r modelo_reg_lineal}
+#i. Ajusto el modelo.
+modelo_lineal <- lm(log(Salario_Horario) ~ anios_educacion + Sexo + Experiencia_Potencial + I(Experiencia_Potencial^2), 
+             data = df_consolidado)
+#ii. Interpretación de los coeficientes.
+summary(modelo_lineal)
+```
+**Significatividad e importancia del modelo:** El estadístico F nos marca como el modelo, en su globalidad, es significativo estadísticamente, en tanto dado el p-value hay evidencia estadística para rechazar la hipótesis nula de que todos los coeficientes son  = 0. Si analizamos el R2, teniendone cuenta que se está prediciendo el log(salario_horario), podemos ver que el modelo explica el 11,95% de la variabilidad del fenómeno, 11,84% si tomamos el R2 ajustado.
+
+**Interpretación de los coeficientes:**
+
+- Intercepto (beta 0): El valor del coeficiente me dice el logarítimo del salario_horario esperado para los varones (categoría basal), cuando las demás variables son = 0, lo cual no tiene una interpretación práctica con sentido. La estimación de dicho parámetro tiene significancia estadística, dado que el intervalo de confianza de 95% no incluye el 0, y la probabilidad de observar dicho parámetro o un valor más extremo es menor a 0.05.
+
+- anios_educacion (beta 1): Un incremento en una unidad en anios_educación está asociado a un cambio en el valor esperado de salario_horario de 8,12%, dadas las demás variables constantes. Dicha estimación tiene significancia estadística.
+
+- Sexo (beta 2): El coeficiente nos dice que las mujeres obtienen un salario_horario de 11.09% menos que los varones, en promedio.
+
+- experiencia_potencial (beta 3): Al aumentar en una unidad la experiencia_potencial, y dada las otras variables constantes, el salario_horario esperado aumenta un 2,29%. Con un p-value < 0.05, se puede concluir que es significativo.
+
+- experiencia_potencial^2 (beta 4): El salario_horario esperado disminuye en 0.02%, al aumentar la experiencia potencial. En otras palabras, esta variable me permite captar relaciones no lineales entre la experiencia_potencial y el salario_horario. Nuevamente, la estimación de dicho parámetro es significativo.
+
+## 9. Modelo con Variables Instrumentales.
+##### Según los antecedentes teóricos, realizaremos un modelo de regresión lineal múltiple pero, esta vez, utilizando la “educación del padre/madre” como VI de “educación”, en tanto esta última puede tener correlación con la habilidad y capacidad del sujeto de estudio, variables omitidas y, por ende, incluídas en el error del modelo. En caso que “educación” sea endógena, deberíamos esperar ver un coeficiente del parámetro dispares entre los modelos, dado el sesgo.Por su parte, el R2 no nos es útil (Wooldridge, 2019).
+<br>
+```{r modelo_variables_instrumentales}
+#i. Ajusto el modelo IV.
+modelo_iv <- ivreg(log(Salario_Horario) ~ anios_educacion + Sexo + Experiencia_Potencial + I(Experiencia_Potencial^2) | 
+                     anios_educacion_progenitor + Sexo + Experiencia_Potencial + I(Experiencia_Potencial^2), 
+                   data = df_consolidado)
+
+#ii. Output
+summary(modelo_iv)
+```
+**Endogeneidad:** Vemos que el coeficiente de anios_educacion pasa de 0.08 a 0.14 entre ambos modelos. Ademas, si observamos el test de Wu-Hausman, que evalúa si el modelo con VI es preferible a la regresión lineal estimada por OLS, el valor del estadístico es 23.29, estadísticamente significativo. Lo cual todo esto nos invita a pensar que la endogeneidad está presente, y que implementar el modelo IV es certero.
+
+**Sobreidentificación:** Dado que en el modelo hay una úbica variable endógena (anios_educacion) y un solo instrumento (anios_educacion_progenitor), no tiene sentido hablar de la posibilidad de sobreidentificación. Eso explica porque el test de Sargan no aplica, ya que requiere más instrumentos que variables endógenas.
+
+**Interpretación de los coeficientes:** Sin lugar a dudas, este modelo nos invita a volver a repensar la explicación del log(salario_horario) en virtud de estos nuevos coeficientes, especialmente teniendo en cuenta el cambio que sufrió los anios_educacion, a saber: Un incremento en una unidad en anios_educación está asociado a un cambio en el valor esperado de salario_horario de 14,45%, dadas las demás variables constantes, y ya no 8,12%. Otro hecho destacable es el cambio sufrido para SexoMujer, lo cual nos hace pensar que en el modelo OLS la educación está absorbiendo parte de las diferencias salariales por género, mientras que en el modelo VI el Sexo refleja mejor el efecto mencionado.
+
+## 10. ¿Es "anios_educacion_progenitor" un buen instrumento?
+```{r regresion_primera_etapa}
+#i. Primera etapa de regresión.
+primera_etapa_modelo <- lm(anios_educacion ~ Sexo + Experiencia_Potencial + I(Experiencia_Potencial^2) + anios_educacion_progenitor, 
+                        data = df_consolidado)
+summary(primera_etapa_modelo)
+
+#ii. Correlación de Pearson.
+correlacion <- cor(df_consolidado$anios_educacion,
+                   df_consolidado$anios_educacion_progenitor)
+cat("Correlación de Pearson entre 'anios_educacion' y 'anios_educacion_progenitor':", correlacion, "\n")
+```
+**Relevancia y Validez:** Los resultados sugieren que anios_educacion_progenitor es un buen instrumento en términos de relevancia para predecir anios_educacion.\n
+
+- Coeficiente de anios_educacion_progenitor:
+En la regresión de la primera etapa, el coeficiente estimado para anios_educacion_progenitor es 0.21, y es estadísticamente significativo (p-value < 0,05). 
+
+- Estadístico F de la primera etapa:
+El valor del estadístico F es > 10, umbral para evitar instrumentos débiles (de hecho, se obtuvo un valor de 218.8).
+
+- Correlación de Pearson:
+Se cumple con el requisito de estar correlacionado con la variable endógena, lo cual es una condición necesaria para un buen instrumento en un modelo de Variables Instrumentales (IV).\n
+
+En cuanto a la validez del instrumento (es decir, que anios_educacion_progenitor no esté correlacionado con el error en la ecuación de salario), esta es una suposición teórica que no podemos verificar directamente. Pero se asume que anios_educacion_progenitor no afecta directamente al salario, excepto a través de la educación del individuo.
+
+**Sesgos y/o limitaciones:** Ahora bien, quedan planteados los siguientes potenciales sesgos/limitaciones a la hora de armar el experimento, a saber:
+
+- Por limitaciones en la obtención de los datos, estamos tomando solamente mayores de 18 años con trabajo y que viven con su progenitor/jefe/a, existiendo un potencial sesgo en tanto excluimos a quienes viven solos y/o están desempleados/desalentados, y quizás el jefe/a no es el progenitor.\n 
+
+- Además, según Wooldridge (2019), la no correlación entre la educación del progenitor y la habilidad del hijo es un supuesto teórico, de no tan alta seguridad.
+
+Sin embargo, dado que el instrumento es relevante, el modelo IV es más probable que proporcione estimaciones consistentes del efecto causal de la educación sobre el salario.
